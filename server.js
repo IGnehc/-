@@ -1,8 +1,17 @@
 const express=require('express');const http=require('http');const{Server}=require('socket.io');const path=require('path');const crypto=require('crypto');
-const app=express();app.use(express.static(path.join(__dirname,'public')));const server=http.createServer(app);const io=new Server(server);const rooms=new Map();const roles=['wolf','wolf','seer','witch','villager','villager'];const label={wolf:'狼人',seer:'预言家',witch:'女巫',villager:'村民'};
+const app=express();app.use(express.static(path.join(__dirname,'public')));const server=http.createServer(app);const io=new Server(server);const rooms=new Map();const lobbyTimers=new Map();const roles=['wolf','wolf','seer','witch','villager','villager'];const label={wolf:'狼人',seer:'预言家',witch:'女巫',villager:'村民'};
 const rand=n=>crypto.randomInt(n),pick=a=>a[rand(a.length)],shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){let j=rand(i+1);[a[i],a[j]]=[a[j],a[i]]}return a};const alive=g=>g.players.filter(p=>p.alive);const human=g=>g.players.filter(p=>!p.ai);const log=(g,t)=>{g.log.push(t);if(g.log.length>120)g.log.shift()};const actor=g=>g.players.find(p=>p.id===g.turn);const byId=(g,id)=>g.players.find(p=>p.id===Number(id));const others=(g,p)=>alive(g).filter(x=>x.id!==p.id);const valid=(g,p,id)=>others(g,p).some(x=>x.id===Number(id));
 function createRoom(socket,name){let code;do{code=crypto.randomBytes(3).toString('hex').toUpperCase()}while(rooms.has(code));let g={code,host:socket.id,players:[],phase:'lobby',day:0,log:[],votes:{},night:{},turn:null,winner:null,started:false,discussion:0};rooms.set(code,g);join(g,socket,name);return g}
-function join(g,socket,name){if(g.started||g.players.filter(p=>!p.ai).length>=6)return false;let used=new Set(g.players.map(p=>p.id));let id=[1,2,3,4,5,6].find(x=>!used.has(x));g.players.push({id,name:String(name||'玩家').slice(0,20),socket:socket.id,ai:false,alive:true,role:null,memory:{suspect:{},notes:[],claims:{},votes:[],checks:{},personality:rand(4)}});socket.join(g.code);socket.data.room=g.code;socket.data.player=id;return true}
+function join(g,socket,name){if(g.started||g.players.filter(p=>!p.ai).length>=6)return false;let used=new Set(g.players.map(p=>p.id));let id=[1,2,3,4,5,6].find(x=>!used.has(x));g.players.push({id,name:String(name||'玩家').slice(0,20),socket:socket.id,token:crypto.randomBytes(24).toString('hex'),ai:false,alive:true,role:null,memory:{suspect:{},notes:[],claims:{},votes:[],checks:{},personality:rand(4)}});socket.join(g.code);socket.data.room=g.code;socket.data.player=id;return true}
+function restore(g,s,token){
+ const p=g.players.find(x=>!x.ai&&x.token===token);
+ if(!p)return null;
+ if(p.socket&&p.socket!==s.id){const old=io.sockets.sockets.get(p.socket);old?.disconnect(true)}
+ p.socket=s.id;s.join(g.code);s.data.room=g.code;s.data.player=p.id;
+ const key=g.code+':'+p.id;clearTimeout(lobbyTimers.get(key));lobbyTimers.delete(key);
+ if(g.host===null||!g.players.some(x=>x.socket===g.host))g.host=s.id;
+ return p;
+}
 function fill(g){for(let i=1;i<=6;i++)if(!g.players.some(p=>p.id===i))g.players.push({id:i,name:`AI ${i}号`,ai:true,alive:true,role:null,memory:{suspect:{},notes:[],claims:{},votes:[],checks:{},personality:rand(4)}});g.players.sort((a,b)=>a.id-b.id)}
 function emit(g){for(const p of g.players.filter(p=>!p.ai&&p.socket)){let s=io.sockets.sockets.get(p.socket);if(!s)continue;s.emit('state',{code:g.code,me:p.id,host:g.host===p.socket,phase:g.phase,day:g.day,players:g.players.map(x=>({id:x.id,name:x.name,ai:x.ai,alive:x.alive,role:x.id===p.id?label[x.role]:g.phase==='ended'?label[x.role]:undefined})),log:g.log.slice(-35),turn:g.turn,winner:g.winner,role:label[p.role],wolfTeammates:p.role==='wolf'?g.players.filter(x=>x.role==='wolf'&&x.id!==p.id).map(x=>({id:x.id,name:x.name,alive:x.alive})):[],witch:p.role==='witch'?{heal:p.heal,poison:p.poison}:null,options:options(g,p),discussion:g.discussion})}}
 function options(g,p){if(g.phase==='lobby'||g.phase==='ended'||!p.alive)return [];if(g.turn!==p.id)return [];if(g.phase==='night_wolf')return alive(g).filter(x=>x.role!=='wolf').map(x=>x.id);if(g.phase==='night_seer')return others(g,p).map(x=>x.id);if(g.phase==='night_witch')return [{id:'skip',name:'跳过'},...(p.heal&&g.night.kill?[{id:'heal',name:`救 ${g.night.kill}号`}]:[]),...(p.poison?alive(g).filter(x=>x.id!==g.night.kill).map(x=>({id:`poison:${x.id}`,name:`毒 ${x.id}号`})) :[])];if(g.phase==='speech'||g.phase==='pk_speech')return ['发言'];if(g.phase==='vote')return [...others(g,p).filter(x=>!g.pk||g.pk.includes(x.id)).map(x=>x.id),'skip'];return []}
@@ -81,5 +90,45 @@ function aiMove(g,p){
  move(g,p,target);
 }
 function move(g,p,value){if(g.turn!==p.id||!p.alive)return;let o=options(g,p),ok=o.some(x=>String(typeof x==='object'?x.id:x)===String(value));if(!ok)return;if(g.phase==='night_wolf')g.night.wolfVotes.push(Number(value));if(g.phase==='night_seer'){let t=byId(g,value);p.memory.notes.push(`第${g.day}夜查验${t.id}号：${t.role==='wolf'?'狼人':'好人'}`);p.memory.checks[t.id]=t.role==='wolf'?'wolf':'good';if(!p.ai){let s=io.sockets.sockets.get(p.socket);s?.emit('private',`查验结果：${t.id}号是${t.role==='wolf'?'狼人':'好人'}`)}}if(g.phase==='night_witch'){if(value==='heal'){g.night.save=true;p.heal=false}else if(String(value).startsWith('poison:')){g.night.poison=Number(String(value).split(':')[1]);p.poison=false}}if(g.phase==='vote')g.votes[p.id]=value;advance(g)}
-io.on('connection',s=>{s.on('create',({name},cb)=>{let g=createRoom(s,name);cb?.({ok:true,code:g.code});emit(g)});s.on('join',({code,name},cb)=>{let g=rooms.get(String(code||'').toUpperCase());if(!g||!join(g,s,name)){cb?.({ok:false,error:'房间不存在、已开始或已满'});return}cb?.({ok:true});emit(g)});s.on('start',()=>{let g=rooms.get(s.data.room);if(g&&g.host===s.id&&!g.started){start(g);emit(g)}});s.on('action',({value,text})=>{let g=rooms.get(s.data.room),p=g&&byId(g,s.data.player);if(!g||!p||p.socket!==s.id||p.ai)return;if((g.phase==='speech'||g.phase==='pk_speech')&&g.turn===p.id&&p.alive){speak(g,p,text);advance(g)}else move(g,p,value)});s.on('disconnect',()=>{let g=rooms.get(s.data.room);if(!g)return;let p=byId(g,s.data.player);if(!g.started){g.players=g.players.filter(x=>x.socket!==s.id);if(!human(g).length)rooms.delete(g.code);else if(g.host===s.id)g.host=human(g)[0].socket;emit(g)}else if(p){p.ai=true;p.socket=null;p.name=`AI接管${p.id}号`;if(g.turn===p.id)next(g);emit(g)}})});
+io.on('connection',s=>{
+ s.on('create',(payload={},cb)=>{
+  if(s.data.room){cb?.({ok:false,error:'你已在一个房间中，请先刷新页面或使用原房间'});return}
+  let g=createRoom(s,payload.name);
+  cb?.({ok:true,code:g.code,token:g.players[0].token});emit(g)
+ });
+ s.on('join',(payload={},cb)=>{
+  const code=String(payload.code||'').trim().toUpperCase();
+  const g=rooms.get(code);
+  if(!g){cb?.({ok:false,error:'房间不存在或服务器已重启。请房主重新创建房间，并发送最新房间码。'});return}
+  if(payload.token){const p=restore(g,s,String(payload.token));if(p){cb?.({ok:true,code,token:p.token,recovered:true});emit(g);return}}
+  if(s.data.room){cb?.({ok:false,error:'你已经加入了一个房间，请勿重复加入。'});return}
+  if(g.started){cb?.({ok:false,error:'对局已经开始，暂时不能中途加入。'});return}
+  if(g.players.length>=6){cb?.({ok:false,error:'房间已有6名玩家，无法加入。'});return}
+  if(!join(g,s,payload.name)){cb?.({ok:false,error:'加入失败，请稍后重试。'});return}
+  const p=byId(g,s.data.player);cb?.({ok:true,code,token:p.token});emit(g)
+ });
+ s.on('start',()=>{let g=rooms.get(s.data.room);if(g&&g.host===s.id&&!g.started){start(g);emit(g)}});
+ s.on('action',({value,text}={})=>{let g=rooms.get(s.data.room),p=g&&byId(g,s.data.player);if(!g||!p||p.socket!==s.id||p.ai)return;if((g.phase==='speech'||g.phase==='pk_speech')&&g.turn===p.id&&p.alive){speak(g,p,text);advance(g)}else move(g,p,value)});
+ s.on('disconnect',()=>{
+  let g=rooms.get(s.data.room);if(!g)return;
+  let p=byId(g,s.data.player);if(!p||p.socket!==s.id)return;
+  if(!g.started){
+   p.socket=null;if(g.host===s.id)g.host=g.players.find(x=>x!==p&&x.socket)?.socket||null;
+   const key=g.code+':'+p.id;
+   const timer=setTimeout(()=>{
+    lobbyTimers.delete(key);
+    if(p.socket||g.started)return;
+    g.players=g.players.filter(x=>x!==p);
+    if(!g.players.length)rooms.delete(g.code);
+    else if(!g.host)g.host=g.players.find(x=>x.socket)?.socket||null;
+    emit(g)
+   },120000);
+   lobbyTimers.set(key,timer);emit(g)
+  }else{
+   // Preserve the original game behaviour: AI takes over a disconnected player.
+   p.ai=true;p.socket=null;p.name=`AI接管${p.id}号`;
+   if(g.turn===p.id)next(g);emit(g)
+  }
+ })
+});
 server.listen(process.env.PORT||3000,()=>console.log('Werewolf server listening on '+(process.env.PORT||3000)));

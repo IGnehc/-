@@ -34,3 +34,13 @@ npm start
 - 无需模型 API Key；这是规则推理 AI，不具备大模型级自然语言理解。
 - 部署 Render：将 server.js 更新到 GitHub，Render 自动部署；若未启用自动部署，手动 Deploy latest commit。
 - 旧的进行中对局不会迁移，部署后需创建新房间。
+
+
+## V2.1 联机修复
+- 新增房间恢复 token，保存在当前浏览器 localStorage 中；断线重连会尝试恢复大厅座位。
+- 大厅断线后保留位置 120 秒，防止网络短断直接删房。
+- 分别提示房间不存在、已经开始、已满。
+- Render 服务器重启仍会丢失内存房间；需要重新创建房间。
+- 游戏开始后断线依旧由 AI 接管，**不支持进行中夺回座位**。
+- 请在同一 Render 服务单实例运行；部署新版本前结束旧对局。
+- 更新 GitHub 的 server.js 和 public/index.html 两个文件。
