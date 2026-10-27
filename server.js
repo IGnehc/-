@@ -1,7 +1,9 @@
 const express=require('express');const http=require('http');const{Server}=require('socket.io');const path=require('path');const crypto=require('crypto');
 const app=express();app.use(express.static(path.join(__dirname,'public')));const server=http.createServer(app);const io=new Server(server);const rooms=new Map();const lobbyTimers=new Map();const roles=['wolf','wolf','seer','witch','villager','villager'];const label={wolf:'狼人',seer:'预言家',witch:'女巫',villager:'村民'};
+const bootId=crypto.randomBytes(4).toString('hex');const diagnostic=(event,data={})=>console.log('[ROOM_DIAG]',JSON.stringify({time:new Date().toISOString(),bootId,event,...data}));
+app.get('/api/health',(_req,res)=>res.json({ok:true,bootId,rooms:rooms.size,uptimeSeconds:Math.floor(process.uptime())}));
 const rand=n=>crypto.randomInt(n),pick=a=>a[rand(a.length)],shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){let j=rand(i+1);[a[i],a[j]]=[a[j],a[i]]}return a};const alive=g=>g.players.filter(p=>p.alive);const human=g=>g.players.filter(p=>!p.ai);const log=(g,t)=>{g.log.push(t);if(g.log.length>120)g.log.shift()};const actor=g=>g.players.find(p=>p.id===g.turn);const byId=(g,id)=>g.players.find(p=>p.id===Number(id));const others=(g,p)=>alive(g).filter(x=>x.id!==p.id);const valid=(g,p,id)=>others(g,p).some(x=>x.id===Number(id));
-function createRoom(socket,name){let code;do{code=crypto.randomBytes(3).toString('hex').toUpperCase()}while(rooms.has(code));let g={code,host:socket.id,players:[],phase:'lobby',day:0,log:[],votes:{},night:{},turn:null,winner:null,started:false,discussion:0};rooms.set(code,g);join(g,socket,name);return g}
+function createRoom(socket,name){let code;do{code=crypto.randomBytes(3).toString('hex').toUpperCase()}while(rooms.has(code));let g={code,host:socket.id,players:[],phase:'lobby',day:0,log:[],votes:{},night:{},turn:null,winner:null,started:false,discussion:0};rooms.set(code,g);join(g,socket,name);diagnostic('create',{code,socket:socket.id,rooms:rooms.size});return g}
 function join(g,socket,name){if(g.started||g.players.filter(p=>!p.ai).length>=6)return false;let used=new Set(g.players.map(p=>p.id));let id=[1,2,3,4,5,6].find(x=>!used.has(x));g.players.push({id,name:String(name||'玩家').slice(0,20),socket:socket.id,token:crypto.randomBytes(24).toString('hex'),ai:false,alive:true,role:null,memory:{suspect:{},notes:[],claims:{},votes:[],checks:{},personality:rand(4)}});socket.join(g.code);socket.data.room=g.code;socket.data.player=id;return true}
 function restore(g,s,token){
  const p=g.players.find(x=>!x.ai&&x.token===token);
@@ -98,18 +100,18 @@ io.on('connection',s=>{
  });
  s.on('join',(payload={},cb)=>{
   const code=String(payload.code||'').trim().toUpperCase();
-  const g=rooms.get(code);
+  const g=rooms.get(code);diagnostic('join_attempt',{code,socket:s.id,found:!!g,rooms:rooms.size,knownCodes:[...rooms.keys()]});
   if(!g){cb?.({ok:false,error:'房间不存在或服务器已重启。请房主重新创建房间，并发送最新房间码。'});return}
   if(payload.token){const p=restore(g,s,String(payload.token));if(p){cb?.({ok:true,code,token:p.token,recovered:true});emit(g);return}}
   if(s.data.room){cb?.({ok:false,error:'你已经加入了一个房间，请勿重复加入。'});return}
   if(g.started){cb?.({ok:false,error:'对局已经开始，暂时不能中途加入。'});return}
   if(g.players.length>=6){cb?.({ok:false,error:'房间已有6名玩家，无法加入。'});return}
   if(!join(g,s,payload.name)){cb?.({ok:false,error:'加入失败，请稍后重试。'});return}
-  const p=byId(g,s.data.player);cb?.({ok:true,code,token:p.token});emit(g)
+  const p=byId(g,s.data.player);diagnostic('join_success',{code,socket:s.id,player:p.id});cb?.({ok:true,code,token:p.token});emit(g)
  });
  s.on('start',()=>{let g=rooms.get(s.data.room);if(g&&g.host===s.id&&!g.started){start(g);emit(g)}});
  s.on('action',({value,text}={})=>{let g=rooms.get(s.data.room),p=g&&byId(g,s.data.player);if(!g||!p||p.socket!==s.id||p.ai)return;if((g.phase==='speech'||g.phase==='pk_speech')&&g.turn===p.id&&p.alive){speak(g,p,text);advance(g)}else move(g,p,value)});
- s.on('disconnect',()=>{
+ s.on('disconnect',(reason)=>{diagnostic('disconnect',{socket:s.id,code:s.data.room||null,reason});
   let g=rooms.get(s.data.room);if(!g)return;
   let p=byId(g,s.data.player);if(!p||p.socket!==s.id)return;
   if(!g.started){
@@ -119,7 +121,7 @@ io.on('connection',s=>{
     lobbyTimers.delete(key);
     if(p.socket||g.started)return;
     g.players=g.players.filter(x=>x!==p);
-    if(!g.players.length)rooms.delete(g.code);
+    if(!g.players.length){rooms.delete(g.code);diagnostic('room_deleted',{code:g.code,reason:'empty_lobby'});}
     else if(!g.host)g.host=g.players.find(x=>x.socket)?.socket||null;
     emit(g)
    },120000);
@@ -131,4 +133,4 @@ io.on('connection',s=>{
   }
  })
 });
-server.listen(process.env.PORT||3000,()=>console.log('Werewolf server listening on '+(process.env.PORT||3000)));
+server.listen(process.env.PORT||3000,'0.0.0.0',()=>{console.log('Werewolf server listening on '+(process.env.PORT||3000));diagnostic('boot',{port:process.env.PORT||3000})});
